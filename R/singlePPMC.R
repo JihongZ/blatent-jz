@@ -49,6 +49,7 @@ singlePPMC = function(model, fullPosterior, estimableCovariances, dataFunctions)
           simData = simData,
           realData = realData,
           estimableCovariances = estimableCovariances
+
         )
       ),
   simData = simData[model$specs$observedVariables],

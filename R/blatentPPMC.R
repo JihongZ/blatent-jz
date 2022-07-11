@@ -41,7 +41,7 @@
 #'
 #' @export
 blatentPPMC = function(model, nSamples, seed = model$options$seed, parallel = TRUE, nCores = 4,
-                       type = c("mean", "covariance", "univariate", "bivariate", "tetrachoric", "pearson"),
+                       type = c("mean", "covariance", "univariate", "bivariate", "tetrachoric", "pearson", "m2"),
                        lowPPMCpercentile = c(.025, .025, 0, 0, .025, .025),
                        highPPMCpercentile = c(.975, .975, 1, 1, .975, .975)){
 
@@ -51,6 +51,38 @@ blatentPPMC = function(model, nSamples, seed = model$options$seed, parallel = TR
   fullPosterior = list(variables = Reduce(f = "rbind", x = model$chain)[, modelParams])
 
   dataFunctions = list()
+
+  # get first- or second-order probability
+  get_p <- function(dat) { # input binary-response data
+    N = nrow(dat)
+    J = ncol(dat)
+    p1 <- colMeans(dat)
+
+    ## second-order marginal
+    itempair <- t(combn(1:J, 2))
+    p2_11 = rep(NA,  nrow(itempair))
+    p2_10 = rep(NA,  nrow(itempair))
+    p2_01 = rep(NA,  nrow(itempair))
+    p2_00 = rep(NA,  nrow(itempair))
+    for (pair in 1:nrow(itempair)) { # pair = 1
+      p2_11[pair] = mean(dat[,itempair[pair,1]] == 1 & dat[,itempair[pair,2]] == 1)
+      p2_10[pair] = mean(dat[,itempair[pair,1]] == 1 & dat[,itempair[pair,2]] == 0)
+      p2_01[pair] = mean(dat[,itempair[pair,1]] == 0 & dat[,itempair[pair,2]] == 1)
+      p2_00[pair] = mean(dat[,itempair[pair,1]] == 0 & dat[,itempair[pair,2]] == 0)
+    }
+
+    p2 = c(p2_11, p2_10, p2_01, p2_00)
+    names(p2) <- c(
+      paste0("P(X", itempair[, 1], "=1,X", itempair[, 2], "=1)" ),
+      paste0("P(X", itempair[, 1], "=1,X", itempair[, 2], "=0)" ),
+      paste0("P(X", itempair[, 1], "=0,X", itempair[, 2], "=1)" ),
+      paste0("P(X", itempair[, 1], "=0,X", itempair[, 2], "=0)" )
+    )
+
+    return(c(p1, p2))
+  }
+
+
 
   if ("mean" %in% type){
     propFunction = function(simData, ...){
@@ -70,7 +102,9 @@ blatentPPMC = function(model, nSamples, seed = model$options$seed, parallel = TR
   }
 
 
-  if (any(c("covariance", "bivariate", "pearson", "tetrachoric") %in% type)){
+
+  if (any(c("covariance", "bivariate", "pearson", "tetrachoric", "m2") %in% type)){
+
 
     # check list of pairwise variables with data for correlation
     obsCov = stats::cov(model$data[model$specs$observedVariables], use = "pairwise.complete.obs")
@@ -99,6 +133,23 @@ blatentPPMC = function(model, nSamples, seed = model$options$seed, parallel = TR
 
   }
 
+  if ("m2" %in% type) {
+    m2function <- function(simData, realData, ...) { # data with row as iteration, column as by person by item
+      # observed up-to-second-order marginal proportion
+      obsP2 = get_p(realData[,1:30])
+
+      # for each iteration get posterior predictive probability
+      p_rep = get_p(simData)
+
+      # C = diag(c(rep(1, J), rep(2, length(p_obs) - J)))
+      PP_M2 = matrix(t(p_rep - obsP2) %*% (p_rep - obsP2), nrow = 1)
+
+      colnames(PP_M2) = "m2"
+      return(PP_M2)
+    }
+    dataFunctions$m2 = m2function
+  }
+
   if ("covariance" %in% type){
     covFunction = function(simData, estimableCovariances, ...){
       covEst = stats::cov(simData, use = "pairwise.complete.obs")
@@ -117,6 +168,7 @@ blatentPPMC = function(model, nSamples, seed = model$options$seed, parallel = TR
 
     dataFunctions$covariance = covFunction
   }
+
 
   if ("pearson" %in% type){
     corFunction = function(simData, estimableCovariances, ...){
@@ -233,7 +285,6 @@ blatentPPMC = function(model, nSamples, seed = model$options$seed, parallel = TR
     coreNum = 1
     nCores = 1
     totalSamples = nSamples
-
     chain = runPPMC(coreNum = 1, nCores = 1, totalSamples = nSamples, PPMCmessage = PPMCmessage,
                     model = model, fullPosterior = fullPosterior, estimableCovariances = estimableCovariances, dataFunctions = dataFunctions)
 
@@ -266,6 +317,11 @@ blatentPPMC = function(model, nSamples, seed = model$options$seed, parallel = TR
 
   # separate PPMC by type
   PPMCresults = list()
+  if ("m2" %in% type){
+    PPMCresults$m2 = list(samples = chain[,grep(pattern = "m2", x = colnames(chain))])
+    PPMCresults$m2$dataResults = dataFunctions$m2(simData = model$data[model$specs$observedVariables], realData = model$data)
+  }
+
   if ("mean" %in% type){
     PPMCresults$mean = list(samples = chain[,grep(pattern = "_proportion", x = colnames(chain))])
     PPMCresults$mean$dataResults = dataFunctions$mean(simData = model$data[model$specs$observedVariables])
@@ -327,6 +383,7 @@ blatentPPMC = function(model, nSamples, seed = model$options$seed, parallel = TR
     )
   }
 
+  if (any(c("mean", "covariance", "bivariate", "pearson", "tetrachoric") %in% type)){
   # calculate posterior predictive p-values for each
   PPMCresults = lapply(X = PPMCresults, FUN = function(x){
     x$quantiles = data.frame(matrix(data = NA, nrow = ncol(x$samples), ncol = 9))
@@ -390,6 +447,7 @@ blatentPPMC = function(model, nSamples, seed = model$options$seed, parallel = TR
       PPMCresults[[ppmc]]$summaryMessage = paste0(preamble, buffer, paramVals, collapse = "")
     }
 
+  }
   }
 
   return(PPMCresults)
